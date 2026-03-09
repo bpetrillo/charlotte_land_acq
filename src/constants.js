@@ -49,7 +49,6 @@ export const CRITERIA = [
   { key: "competition", label: "Low Competitor Activity",        icon: "🔭" },
 ];
 
-// Weight multipliers per type — higher = more important for that dev type
 export const WEIGHTS = {
   Residential: { acreage: 1.2, zoning: 1.1, roads: 0.9, utilities: 1.0, schools: 1.5, competition: 1.0 },
   Multifamily: { acreage: 1.0, zoning: 1.2, roads: 1.3, utilities: 1.2, schools: 0.8, competition: 1.1 },
