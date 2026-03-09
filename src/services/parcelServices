@@ -1,0 +1,290 @@
+/**
+ * parcelService.js
+ *
+ * Connects to free public parcel / GIS data sources for the Charlotte metro.
+ * Currently wired to:
+ *   1. Mecklenburg County GIS REST API (ArcGIS FeatureServer) — free, no key needed
+ *   2. NC OneMap CGIA parcel layer — statewide, free
+ *   3. Regrid API — enriched ownership + vacancy data (requires API key, free tier available)
+ *
+ * To add your Regrid key: set VITE_REGRID_API_KEY in your .env file.
+ */
+
+// ─── Mecklenburg County GIS ──────────────────────────────────────────────────
+// Docs: https://maps.mecknc.gov/arcgis/rest/services
+const MECK_PARCEL_URL =
+  "https://maps.mecknc.gov/arcgis/rest/services/LUESA/ParcelData/MapServer/0/query";
+
+/**
+ * Search Mecklenburg County parcels by zoning, min acreage, or owner keyword.
+ * Returns normalized parcel objects.
+ */
+export async function searchMecklenburgParcels({ zoning, minAcres, ownerKeyword } = {}) {
+  const whereParts = ["1=1"];
+
+  if (zoning) whereParts.push(`ZONING_CODE = '${zoning}'`);
+  if (minAcres) whereParts.push(`CALCULATED_ACRES >= ${minAcres}`);
+  if (ownerKeyword) whereParts.push(`OWNER_NAME LIKE '%${ownerKeyword.toUpperCase()}%'`);
+
+  const params = new URLSearchParams({
+    where: whereParts.join(" AND "),
+    outFields: "PARCEL_ID,OWNER_NAME,SITE_ADDRESS,CALCULATED_ACRES,ZONING_CODE,LAND_VALUE,TOTAL_VALUE,YEAR_BUILT",
+    returnGeometry: false,
+    f: "json",
+    resultRecordCount: 50,
+  });
+
+  try {
+    const res = await fetch(`${MECK_PARCEL_URL}?${params}`);
+    const data = await res.json();
+
+    if (!data.features) return [];
+
+    return data.features.map((f) => normalizeMecklenburgParcel(f.attributes));
+  } catch (err) {
+    console.error("Mecklenburg GIS error:", err);
+    return [];
+  }
+}
+
+function normalizeMecklenburgParcel(attr) {
+  return {
+    parcelId: attr.PARCEL_ID,
+    source: "Mecklenburg GIS",
+    county: "Mecklenburg",
+    owner: attr.OWNER_NAME ?? "Unknown",
+    address: attr.SITE_ADDRESS ?? "",
+    acres: parseFloat(attr.CALCULATED_ACRES) || 0,
+    zoning: attr.ZONING_CODE ?? "",
+    landValue: attr.LAND_VALUE ?? 0,
+    totalValue: attr.TOTAL_VALUE ?? 0,
+    yearBuilt: attr.YEAR_BUILT ?? null,
+    isVacant: !attr.YEAR_BUILT,
+    lastUpdated: new Date().toISOString().split("T")[0],
+  };
+}
+
+// ─── Regrid API (enriched nationwide parcel data) ────────────────────────────
+// Sign up free at: https://regrid.com/api
+// Set VITE_REGRID_API_KEY in your .env file
+const REGRID_BASE = "https://app.regrid.com/api/v2";
+
+/**
+ * Search Regrid for parcels in a county by bounding box or text query.
+ * Requires VITE_REGRID_API_KEY in .env
+ */
+export async function searchRegridParcels({ county, state = "NC", query, minAcres } = {}) {
+  const apiKey = import.meta.env.VITE_REGRID_API_KEY;
+  if (!apiKey) {
+    console.warn("No VITE_REGRID_API_KEY set — skipping Regrid search");
+    return [];
+  }
+
+  const path = `/parcels/search`;
+  const params = new URLSearchParams({
+    token: apiKey,
+    query: query || `${county} County, ${state}`,
+    limit: 50,
+  });
+
+  try {
+    const res = await fetch(`${REGRID_BASE}${path}?${params}`);
+    const data = await res.json();
+
+    if (!data.parcels?.features) return [];
+
+    return data.parcels.features
+      .map((f) => normalizeRegridParcel(f.properties, county))
+      .filter((p) => !minAcres || p.acres >= minAcres);
+  } catch (err) {
+    console.error("Regrid API error:", err);
+    return [];
+  }
+}
+
+function normalizeRegridParcel(p, county) {
+  return {
+    parcelId: p.parcelnumb,
+    source: "Regrid",
+    county: county ?? p.county,
+    owner: p.owner ?? "Unknown",
+    address: [p.address, p.city, p.state2, p.zip].filter(Boolean).join(", "),
+    acres: parseFloat(p.ll_gisacre) || parseFloat(p.srcacreage) || 0,
+    zoning: p.zoning ?? "",
+    landValue: p.landval ?? 0,
+    totalValue: p.parval ?? 0,
+    yearBuilt: p.yearbuilt ?? null,
+    isVacant: p.usedesc?.toLowerCase().includes("vacant") || !p.yearbuilt,
+    lastUpdated: new Date().toISOString().split("T")[0],
+  };
+}
+
+// ─── ATTOM Data API ───────────────────────────────────────────────────────────
+// Sign up at: https://api.attomdata.com — free tier available
+// Set VITE_ATTOM_API_KEY in .env
+const ATTOM_BASE = "https://api.gateway.attomdata.com/propertyapi/v1.0.0";
+
+/**
+ * Fetch vacant / development-ready properties via ATTOM's property API.
+ */
+export async function searchAttomParcels({ city, state = "NC", minLotSize } = {}) {
+  const apiKey = import.meta.env.VITE_ATTOM_API_KEY;
+  if (!apiKey) {
+    console.warn("No VITE_ATTOM_API_KEY set — skipping ATTOM search");
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    address1: city,
+    address2: state,
+    propertytype: "VACANT LAND",
+    ...(minLotSize && { minLotSize }),
+  });
+
+  try {
+    const res = await fetch(`${ATTOM_BASE}/property/basicprofile?${params}`, {
+      headers: { apikey: apiKey, accept: "application/json" },
+    });
+    const data = await res.json();
+
+    if (!data.property) return [];
+
+    return data.property.map((p) => normalizeAttomParcel(p));
+  } catch (err) {
+    console.error("ATTOM API error:", err);
+    return [];
+  }
+}
+
+function normalizeAttomParcel(p) {
+  const addr = p.address?.oneLine ?? "";
+  const lot = p.lot;
+  return {
+    parcelId: p.identifier?.apn ?? String(p.identifier?.Id),
+    source: "ATTOM",
+    county: p.address?.countySub ?? "",
+    owner: p.assessment?.owner?.owner1?.fullName ?? "Unknown",
+    address: addr,
+    acres: lot?.lotSize1 ? lot.lotSize1 / 43560 : 0, // sq ft → acres
+    zoning: p.summary?.propClass ?? "",
+    landValue: p.assessment?.assessed?.assdLandValue ?? 0,
+    totalValue: p.assessment?.assessed?.assdTtlValue ?? 0,
+    yearBuilt: p.summary?.yearBuilt ?? null,
+    isVacant: true,
+    lastUpdated: new Date().toISOString().split("T")[0],
+  };
+}
+
+// ─── Auto-Score helper ────────────────────────────────────────────────────────
+import { WEIGHTS, CRITERIA } from "../constants";
+import ZONING_CODES from "../data/zoningCodes";
+
+/**
+ * Auto-generate criterion scores from raw parcel data.
+ * This is a heuristic — human review is still recommended.
+ */
+export function autoScoreParcel(parcel, devType = "Residential") {
+  const z = ZONING_CODES[parcel.zoning?.toUpperCase()];
+  const zoningScore = z
+    ? z.compatible.includes(devType) ? 4 : 2
+    : 3;
+
+  return {
+    acreage:     scoreAcreage(parcel.acres, devType),
+    zoning:      zoningScore,
+    roads:       3, // requires map data — default to neutral
+    utilities:   parcel.isVacant ? 2 : 4,
+    schools:     3, // requires school district lookup
+    competition: 3, // requires comparable search
+  };
+}
+
+function scoreAcreage(acres, devType) {
+  if (devType === "Residential") {
+    if (acres >= 50) return 5;
+    if (acres >= 20) return 4;
+    if (acres >= 10) return 3;
+    if (acres >= 5)  return 2;
+    return 1;
+  }
+  if (devType === "Multifamily") {
+    if (acres >= 15) return 5;
+    if (acres >= 8)  return 4;
+    if (acres >= 4)  return 3;
+    if (acres >= 2)  return 2;
+    return 1;
+  }
+  // Commercial
+  if (acres >= 10) return 5;
+  if (acres >= 5)  return 4;
+  if (acres >= 2)  return 3;
+  if (acres >= 1)  return 2;
+  return 1;
+}
+
+// ─── Combined search across all enabled sources ───────────────────────────────
+/**
+ * Run a unified parcel search across all configured data sources.
+ * Returns normalized parcel[] ready to be converted into site prospects.
+ *
+ * @param {object} opts
+ * @param {string}  opts.county       - e.g. "Mecklenburg"
+ * @param {string}  opts.zoning       - e.g. "R-20"
+ * @param {number}  opts.minAcres     - Minimum acreage
+ * @param {string}  opts.devType      - "Residential" | "Multifamily" | "Commercial"
+ * @param {boolean} opts.vacantOnly   - Only return vacant / unimproved parcels
+ */
+export async function searchAllSources({ county, zoning, minAcres, devType, vacantOnly } = {}) {
+  const results = await Promise.allSettled([
+    county === "Mecklenburg"
+      ? searchMecklenburgParcels({ zoning, minAcres })
+      : Promise.resolve([]),
+    searchRegridParcels({ county, minAcres }),
+    searchAttomParcels({ city: `${county} County`, minLotSize: minAcres ? minAcres * 43560 : undefined }),
+  ]);
+
+  const allParcels = results
+    .filter((r) => r.status === "fulfilled")
+    .flatMap((r) => r.value);
+
+  // Deduplicate by address
+  const seen = new Set();
+  const unique = allParcels.filter((p) => {
+    const key = p.address.toLowerCase().trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // Filter vacant if requested
+  const filtered = vacantOnly ? unique.filter((p) => p.isVacant) : unique;
+
+  // Auto-score and convert to prospect shape
+  return filtered.map((p) => parcelToProspect(p, devType ?? "Residential"));
+}
+
+/**
+ * Convert a raw parcel into a LandTrack prospect object.
+ */
+export function parcelToProspect(parcel, devType = "Residential") {
+  return {
+    id: `parcel-${parcel.parcelId ?? Date.now()}-${Math.random().toString(36).slice(2)}`,
+    name: parcel.address.split(",")[0] || "Unnamed Parcel",
+    county: parcel.county,
+    type: devType,
+    status: "Prospect",
+    acres: Math.round(parcel.acres * 10) / 10,
+    askingPrice: parcel.totalValue ?? 0,
+    address: parcel.address,
+    zoning: parcel.zoning,
+    contact: parcel.owner,
+    phone: "",
+    notes: `Source: ${parcel.source}. ${parcel.isVacant ? "Vacant land." : `Improved, built ${parcel.yearBuilt}.`} Land value: $${parcel.landValue?.toLocaleString() ?? "N/A"}`,
+    scores: autoScoreParcel(parcel, devType),
+    dateAdded: parcel.lastUpdated,
+    priority: "Medium",
+    isAutoImported: true,
+    parcelId: parcel.parcelId,
+    dataSource: parcel.source,
+  };
+}
