@@ -1,14 +1,15 @@
 import { useState } from "react";
-import { SITE_TYPES, TYPE_COLORS, TYPE_ICONS, STATUS_COLORS } from "./constants";
-import { useSites } from "./hooks/useSites";
-import { useFilters } from "./hooks/useFilters";
-import Sidebar from "./components/Sidebar";
-import SiteDetail from "./components/SiteDetail";
-import PipelineView from "./components/PipelineView";
-import ZoningKey from "./components/ZoningKey";
-import ScoreGuide from "./components/ScoreGuide";
-import AddSiteModal from "./components/AddSiteModal";
-import ParcelSearch from "./components/ParcelSearch";
+import { SITE_TYPES, TYPE_COLORS, TYPE_ICONS, STATUS_COLORS } from "./constants.js";
+import { weightedScore } from "./utils/scoring.js";
+import { useSites } from "./hooks/useSites.js";
+import { useFilters } from "./hooks/useFilters.js";
+import Sidebar from "./components/Sidebar.jsx";
+import SiteDetail from "./components/SiteDetail.jsx";
+import PipelineView from "./components/PipelineView.jsx";
+import ZoningKey from "./components/ZoningKey.jsx";
+import ScoreGuide from "./components/ScoreGuide.jsx";
+import AddSiteModal from "./components/AddSiteModal.jsx";
+import ParcelSearch from "./components/ParcelSearch.jsx";
 
 const VIEWS = [
   { id: "sites",    label: "📋 Sites" },
@@ -217,7 +218,6 @@ export default function App() {
               {/* Top site cards */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, maxWidth: 520 }}>
                 {sorted.slice(0, 6).map((s) => {
-                  const { weightedScore } = require("./utils/scoring");
                   const sc = weightedScore(s.scores, s.type);
                   const tc = TYPE_COLORS[s.type];
                   return (
