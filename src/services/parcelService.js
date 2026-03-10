@@ -1,5 +1,8 @@
 /**
- * parcelService.js — ArcGIS-powered Charlotte Metro parcel search
+ * parcelService.js — Charlotte Metro parcel search via ArcGIS Living Atlas
+ *
+ * Uses ArcGIS OAuth2 app credentials to query the Regrid-powered Living Atlas
+ * nationwide parcel layer — no separate NC OneMap token needed.
  *
  * .env variables required:
  *   VITE_ARCGIS_CLIENT_ID=your_client_id
@@ -14,7 +17,7 @@ export async function getArcGISToken() {
   const clientSecret = import.meta.env.VITE_ARCGIS_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    console.warn("ArcGIS credentials not configured in environment variables.");
+    console.warn("ArcGIS credentials not configured.");
     return null;
   }
 
@@ -24,7 +27,7 @@ export async function getArcGISToken() {
 
   try {
     const res = await fetch("https://www.arcgis.com/sharing/rest/oauth2/token", {
-      method: "POST",
+      method:  "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id:     clientId,
@@ -33,7 +36,6 @@ export async function getArcGISToken() {
         f:             "json",
       }),
     });
-
     const data = await res.json();
     if (data.error) throw new Error(JSON.stringify(data.error));
 
@@ -41,6 +43,7 @@ export async function getArcGISToken() {
       token:     data.access_token,
       expiresAt: Date.now() + data.expires_in * 1000,
     };
+    console.log("ArcGIS token acquired successfully.");
     return _tokenCache.token;
   } catch (err) {
     console.error("ArcGIS token fetch failed:", err.message);
@@ -48,89 +51,28 @@ export async function getArcGISToken() {
   }
 }
 
-// ─── NC OneMap Statewide Parcel Layer ─────────────────────────────────────────
-// Covers all Charlotte metro counties. CORS-friendly.
-const NC_PARCEL_URL =
-  "https://services.nconemap.gov/secure/rest/services/NC1Map_Parcels/FeatureServer/1/query";
-
-const COUNTY_FIPS = {
-  Mecklenburg: "119",
-  Cabarrus:    "025",
-  Union:       "179",
-  Iredell:     "097",
-  Gaston:      "071",
-  Rowan:       "159",
-  Lincoln:     "109",
-};
-
-export async function searchNCParcels({ county, minAcres, vacantOnly } = {}) {
-  const token = await getArcGISToken();
-  const whereParts = ["1=1"];
-
-  if (county && COUNTY_FIPS[county]) {
-    whereParts.push(`COUNTY_FIPS = '${COUNTY_FIPS[county]}'`);
-  }
-  if (minAcres)   whereParts.push(`CALC_ACRES >= ${minAcres}`);
-  if (vacantOnly) whereParts.push(`LAND_CLASS LIKE '%VACANT%'`);
-
-  const params = new URLSearchParams({
-    where:             whereParts.join(" AND "),
-    outFields:         "PIN,OWNER,SITE_ADDRESS,CITY,CALC_ACRES,ZONING,LAND_VALUE,TOTAL_VALUE,YEAR_BUILT,LAND_CLASS",
-    returnGeometry:    false,
-    f:                 "json",
-    resultRecordCount: 50,
-    ...(token ? { token } : {}),
-  });
-
-  try {
-    const res  = await fetch(`${NC_PARCEL_URL}?${params}`);
-    const data = await res.json();
-    if (data.error) {
-      console.warn("NC OneMap error:", data.error.message);
-      return [];
-    }
-    if (!data.features?.length) return [];
-    return data.features.map((f) => normalizeNCParcel(f.attributes, county));
-  } catch (err) {
-    console.error("NC Parcel fetch failed:", err.message);
-    return [];
-  }
-}
-
-function normalizeNCParcel(a, county) {
-  return {
-    parcelId:    a.PIN ?? String(Math.random()),
-    source:      "NC OneMap",
-    county:      county ?? "",
-    owner:       a.OWNER        ?? "Unknown",
-    address:     [a.SITE_ADDRESS, a.CITY, "NC"].filter(Boolean).join(", "),
-    acres:       parseFloat(a.CALC_ACRES) || 0,
-    zoning:      a.ZONING       ?? "",
-    landValue:   a.LAND_VALUE   ?? 0,
-    totalValue:  a.TOTAL_VALUE  ?? 0,
-    yearBuilt:   a.YEAR_BUILT   ?? null,
-    isVacant:    a.LAND_CLASS?.includes("VACANT") || !a.YEAR_BUILT,
-    lastUpdated: new Date().toISOString().split("T")[0],
-  };
-}
-
-// ─── ArcGIS Living Atlas US Parcels ───────────────────────────────────────────
-// Premium content — requires ArcGIS subscription with Living Atlas access.
-const LIVING_ATLAS_URL =
-  "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Parcels/FeatureServer/0/query";
+// ─── ArcGIS Living Atlas — Regrid US Parcels ─────────────────────────────────
+// This is the correct Living Atlas layer powered by Regrid.
+// Requires ArcGIS Online subscription with Living Atlas premium content access.
+// Layer item: https://www.arcgis.com/home/item.html?id=d9e3cf05f5be4d8b9e3c8a63f1e3ebb0
+const REGRID_PARCEL_URL =
+  "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/Regrid_Parcels_for_the_United_States/FeatureServer/0/query";
 
 export async function searchLivingAtlasParcels({ county, minAcres, vacantOnly } = {}) {
   const token = await getArcGISToken();
-  if (!token) return [];
+  if (!token) {
+    console.warn("No ArcGIS token — skipping Living Atlas search.");
+    return [];
+  }
 
-  const whereParts = [`STATE_NAME = 'North Carolina'`];
-  if (county)     whereParts.push(`COUNTY_NAME = '${county} County'`);
-  if (minAcres)   whereParts.push(`LOT_SIZE_AC >= ${minAcres}`);
-  if (vacantOnly) whereParts.push(`LAND_USE LIKE '%VACANT%'`);
+  const whereParts = [`state2 = 'NC'`];
+  if (county) whereParts.push(`county = '${county.toUpperCase()}'`);
+  if (minAcres) whereParts.push(`ll_gisacre >= ${minAcres}`);
+  if (vacantOnly) whereParts.push(`usedesc LIKE '%VACANT%'`);
 
   const params = new URLSearchParams({
     where:             whereParts.join(" AND "),
-    outFields:         "APN,OWNER_NAME,SITUS_ADDRESS,SITUS_CITY,LOT_SIZE_AC,ZONING,LAND_VALUE,TOTAL_VALUE,YEAR_BUILT,LAND_USE",
+    outFields:         "parcelnumb,owner,address,city,state2,county,ll_gisacre,zoning,landval,parval,yearbuilt,usedesc",
     returnGeometry:    false,
     f:                 "json",
     resultRecordCount: 50,
@@ -138,33 +80,101 @@ export async function searchLivingAtlasParcels({ county, minAcres, vacantOnly } 
   });
 
   try {
-    const res  = await fetch(`${LIVING_ATLAS_URL}?${params}`);
+    const res  = await fetch(`${REGRID_PARCEL_URL}?${params}`);
     const data = await res.json();
+
     if (data.error) {
-      console.warn("Living Atlas not accessible:", data.error.message);
+      console.warn("Living Atlas Regrid error:", data.error.message);
+      // Fall back to ArcGIS Online hosted NC parcels
+      return searchArcGISOnlineNCParcels({ county, minAcres, vacantOnly, token });
+    }
+
+    if (!data.features?.length) return [];
+    console.log(`Living Atlas returned ${data.features.length} parcels.`);
+    return data.features.map((f) => normalizeRegridParcel(f.attributes, county));
+  } catch (err) {
+    console.error("Living Atlas fetch failed:", err.message);
+    return searchArcGISOnlineNCParcels({ county, minAcres, vacantOnly, token });
+  }
+}
+
+function normalizeRegridParcel(a, county) {
+  return {
+    parcelId:    a.parcelnumb ?? String(Math.random()),
+    source:      "ArcGIS Living Atlas (Regrid)",
+    county:      county ?? a.county ?? "",
+    owner:       a.owner    ?? "Unknown",
+    address:     [a.address, a.city, a.state2].filter(Boolean).join(", "),
+    acres:       parseFloat(a.ll_gisacre) || 0,
+    zoning:      a.zoning   ?? "",
+    landValue:   a.landval  ?? 0,
+    totalValue:  a.parval   ?? 0,
+    yearBuilt:   a.yearbuilt ?? null,
+    isVacant:    a.usedesc?.toUpperCase().includes("VACANT") || !a.yearbuilt,
+    lastUpdated: new Date().toISOString().split("T")[0],
+  };
+}
+
+// ─── Fallback: ArcGIS Online hosted NC parcels (public, no token needed) ─────
+// Hosted publicly on ArcGIS Online by NC OneMap open data hub
+const NC_OPEN_PARCEL_URL =
+  "https://services1.arcgis.com/YBQjZE7pCkH6LKOD/arcgis/rest/services/NC_Parcels/FeatureServer/0/query";
+
+const COUNTY_NAMES = {
+  Mecklenburg: "MECKLENBURG",
+  Cabarrus:    "CABARRUS",
+  Union:       "UNION",
+  Iredell:     "IREDELL",
+  Gaston:      "GASTON",
+  Rowan:       "ROWAN",
+  Lincoln:     "LINCOLN",
+};
+
+export async function searchArcGISOnlineNCParcels({ county, minAcres, vacantOnly, token } = {}) {
+  const whereParts = ["1=1"];
+  if (county && COUNTY_NAMES[county]) whereParts.push(`COUNTY = '${COUNTY_NAMES[county]}'`);
+  if (minAcres)   whereParts.push(`CALCACRES >= ${minAcres}`);
+  if (vacantOnly) whereParts.push(`LANDUSE LIKE '%VACANT%'`);
+
+  const params = new URLSearchParams({
+    where:             whereParts.join(" AND "),
+    outFields:         "PIN,OWNNAME,SITUSADDR,SITUSCITY,CALCACRES,ZONING,LANDVAL,PARVAL,YEARBUILT,LANDUSE",
+    returnGeometry:    false,
+    f:                 "json",
+    resultRecordCount: 50,
+    ...(token ? { token } : {}),
+  });
+
+  try {
+    const res  = await fetch(`${NC_OPEN_PARCEL_URL}?${params}`);
+    const data = await res.json();
+
+    if (data.error) {
+      console.warn("NC Open Parcels error:", data.error.message);
       return [];
     }
     if (!data.features?.length) return [];
-    return data.features.map((f) => normalizeLivingAtlasParcel(f.attributes, county));
+    console.log(`NC Open Parcels returned ${data.features.length} parcels.`);
+    return data.features.map((f) => normalizeOpenNCParcel(f.attributes, county));
   } catch (err) {
-    console.error("Living Atlas fetch failed:", err.message);
+    console.error("NC Open Parcels fetch failed:", err.message);
     return [];
   }
 }
 
-function normalizeLivingAtlasParcel(a, county) {
+function normalizeOpenNCParcel(a, county) {
   return {
-    parcelId:    a.APN ?? String(Math.random()),
-    source:      "ArcGIS Living Atlas",
+    parcelId:    a.PIN ?? String(Math.random()),
+    source:      "NC Parcels (ArcGIS Online)",
     county:      county ?? "",
-    owner:       a.OWNER_NAME  ?? "Unknown",
-    address:     [a.SITUS_ADDRESS, a.SITUS_CITY, "NC"].filter(Boolean).join(", "),
-    acres:       parseFloat(a.LOT_SIZE_AC) || 0,
-    zoning:      a.ZONING      ?? "",
-    landValue:   a.LAND_VALUE  ?? 0,
-    totalValue:  a.TOTAL_VALUE ?? 0,
-    yearBuilt:   a.YEAR_BUILT  ?? null,
-    isVacant:    a.LAND_USE?.includes("VACANT") || !a.YEAR_BUILT,
+    owner:       a.OWNNAME    ?? "Unknown",
+    address:     [a.SITUSADDR, a.SITUSCITY, "NC"].filter(Boolean).join(", "),
+    acres:       parseFloat(a.CALCACRES) || 0,
+    zoning:      a.ZONING     ?? "",
+    landValue:   a.LANDVAL    ?? 0,
+    totalValue:  a.PARVAL     ?? 0,
+    yearBuilt:   a.YEARBUILT  ?? null,
+    isVacant:    a.LANDUSE?.includes("VACANT") || !a.YEARBUILT,
     lastUpdated: new Date().toISOString().split("T")[0],
   };
 }
@@ -213,20 +223,12 @@ function scoreAcreage(acres, devType) {
 
 // ─── Combined search ──────────────────────────────────────────────────────────
 export async function searchAllSources({ county, minAcres, devType, vacantOnly } = {}) {
-  // Run both sources in parallel — each fails gracefully
-  const [ncResult, laResult] = await Promise.allSettled([
-    searchNCParcels({ county, minAcres, vacantOnly }),
-    searchLivingAtlasParcels({ county, minAcres, vacantOnly }),
-  ]);
-
-  const allParcels = [
-    ...(ncResult.status === "fulfilled" ? ncResult.value : []),
-    ...(laResult.status === "fulfilled" ? laResult.value : []),
-  ];
+  // Try Living Atlas first (best data), falls back to NC Open automatically
+  const parcels = await searchLivingAtlasParcels({ county, minAcres, vacantOnly });
 
   // Deduplicate by address
   const seen   = new Set();
-  const unique = allParcels.filter((p) => {
+  const unique = parcels.filter((p) => {
     const key = p.address.toLowerCase().trim();
     if (!key || seen.has(key)) return false;
     seen.add(key);
