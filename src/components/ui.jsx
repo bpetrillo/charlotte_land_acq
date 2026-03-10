@@ -1,4 +1,4 @@
-import { scoreColor } from "../utils/scoring";
+import { scoreColor } from "../utils/scoring.js";
 
 /**
  * Colored pill / badge component.
