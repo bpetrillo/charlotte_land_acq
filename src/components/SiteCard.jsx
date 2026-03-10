@@ -1,6 +1,6 @@
-import { TYPE_COLORS, TYPE_ICONS, STATUS_COLORS, ZONING_CAT_COLORS } from "../constants";
-import ZONING_CODES from "../data/zoningCodes";
-import { weightedScore } from "../utils/scoring";
+import { TYPE_COLORS, TYPE_ICONS, STATUS_COLORS, ZONING_CAT_COLORS } from "../constants.js";
+import ZONING_CODES from "../data/zoningCodes.js";
+import { weightedScore } from "../utils/scoring.js";
 import { Pill, ScoreRing } from "./ui";
 
 export default function SiteCard({ site, onSelect, selected }) {
