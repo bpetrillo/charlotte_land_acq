@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { SITE_TYPES, COUNTIES, TYPE_COLORS, TYPE_ICONS } from "../constants";
-import { searchAllSources } from "../services/parcelService";
+import { SITE_TYPES, COUNTIES, TYPE_COLORS, TYPE_ICONS } from "../constants.js";
+import { searchAllSources } from "../services/parcelService.js";
 
 const MIN_ACRES_OPTIONS = [1, 2, 5, 10, 20, 50];
 
